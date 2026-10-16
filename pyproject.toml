@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sfs"
+version = "0.1.0"
+description = "Stark Food Services (SFS) — synthetic foodservice supply-chain data generator and analytics demo"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+sfs-generate = "sfs.generate:main"
+sfs-validate = "sfs.validate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
