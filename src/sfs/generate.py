@@ -615,6 +615,8 @@ def build_po_and_ap(
                         {
                             "po_line_id": f"POL-{pol_seq:07d}",
                             "po_id": po_id,
+                            "order_date": order_date.isoformat(),
+                            "dc_id": dc["dc_id"],
                             "line_number": line_no,
                             "sku": prod["sku"],
                             "ordered_cases": ordered_cases,
@@ -871,6 +873,9 @@ def generate_orders_lines_shipments(
                             {
                                 "order_line_id": f"OL-{ol_seq:07d}",
                                 "order_id": order_id,
+                                "order_date": date_str,
+                                "dc_id": dc_id,
+                                "customer_id": cid,
                                 "line_number": line_no,
                                 "sku": prod["sku"],
                                 "ordered_cases": ordered_cases,

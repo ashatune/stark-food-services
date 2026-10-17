@@ -12,8 +12,11 @@ stark-food-services/
 ├── Makefile                 # Build, data generation, and validation targets
 ├── README.md                # Full schema dictionary & intentional pattern documentation
 ├── pyproject.toml           # Python 3.11+ package configuration (src/sfs layout)
+├── scripts/
+│   └── load_bq.sh           # Idempotent BigQuery loader (--replace) for data/*.jsonl
 ├── sql/
-│   └── schema.sql           # Project-agnostic BigQuery DDL for all 12 SFS tables
+│   ├── schema.sql           # Project-agnostic BigQuery DDL for all 12 sfs_demo tables
+│   └── validate.sql         # BigQuery integrity & analytical pattern discovery queries
 └── src/
     └── sfs/
         ├── __init__.py      # Package metadata
@@ -39,6 +42,13 @@ make generate
 # 3. Validate row counts, primary/foreign keys, and analytical patterns (~2.6s)
 make validate
 # (or: PYTHONPATH=src .venv/bin/python -m sfs.validate)
+
+# 4. Create BigQuery tables and load all data/*.jsonl into dataset sfs_demo (US)
+bq --location=US query --use_legacy_sql=false < sql/schema.sql
+make load
+
+# 5. Run BigQuery SQL validation & pattern discovery queries
+bq --location=US query --use_legacy_sql=false < sql/validate.sql
 ```
 
 ---
@@ -51,27 +61,46 @@ make validate
 
 | Table | File | Row Count | Size (MB) | Grain |
 |---|---|---:|---:|---|
-| `sfs.distribution_centers` | `data/distribution_centers.jsonl` | 7 | 0.00 | 1 row per regional SFS distribution center |
-| `sfs.suppliers` | `data/suppliers.jsonl` | 42 | 0.01 | 1 row per foodservice vendor/grower/packer |
-| `sfs.products` | `data/products.jsonl` | 600 | 0.19 | 1 row per catalog SKU |
-| `sfs.customers` | `data/customers.jsonl` | 400 | 0.09 | 1 row per foodservice operator account |
-| `sfs.customer_contacts` | `data/customer_contacts.jsonl` | 743 | 0.16 | 1 row per operator contact (**PII-bearing**) |
-| `sfs.purchase_orders` | `data/purchase_orders.jsonl` | 8,848 | 2.86 | 1 row per inbound supplier replenishment PO |
-| `sfs.po_lines` | `data/po_lines.jsonl` | 39,797 | 6.67 | 1 row per replenishment PO line item |
-| `sfs.accounts_payable` | `data/accounts_payable.jsonl` | 8,848 | 3.56 | 1 row per supplier remittance (**Sensitive banking/tax**) |
-| `sfs.orders` | `data/orders.jsonl` | 41,175 | 10.36 | 1 row per outbound customer sales order |
-| `sfs.order_lines` | `data/order_lines.jsonl` | 250,272 | 55.36 | 1 row per customer order line item |
-| `sfs.shipments` | `data/shipments.jsonl` | 41,175 | 12.63 | 1 row per outbound route shipment |
-| `sfs.inventory_snapshots` | `data/inventory_snapshots.jsonl` | 2,301,600 | 281.29 | Daily `DC x SKU` end-of-day inventory snapshot |
+| `sfs_demo.distribution_centers` | `data/distribution_centers.jsonl` | 7 | 0.00 | 1 row per regional SFS distribution center |
+| `sfs_demo.suppliers` | `data/suppliers.jsonl` | 42 | 0.01 | 1 row per foodservice vendor/grower/packer |
+| `sfs_demo.products` | `data/products.jsonl` | 600 | 0.19 | 1 row per catalog SKU |
+| `sfs_demo.customers` | `data/customers.jsonl` | 400 | 0.09 | 1 row per foodservice operator account |
+| `sfs_demo.customer_contacts` | `data/customer_contacts.jsonl` | 743 | 0.16 | 1 row per operator contact (**PII-bearing**) |
+| `sfs_demo.purchase_orders` | `data/purchase_orders.jsonl` | 8,848 | 2.86 | 1 row per inbound supplier replenishment PO |
+| `sfs_demo.po_lines` | `data/po_lines.jsonl` | 39,797 | 6.67 | 1 row per replenishment PO line item |
+| `sfs_demo.accounts_payable` | `data/accounts_payable.jsonl` | 8,848 | 3.56 | 1 row per supplier remittance (**Sensitive banking/tax**) |
+| `sfs_demo.orders` | `data/orders.jsonl` | 41,175 | 10.36 | 1 row per outbound customer sales order |
+| `sfs_demo.order_lines` | `data/order_lines.jsonl` | 250,272 | 55.36 | 1 row per customer order line item |
+| `sfs_demo.shipments` | `data/shipments.jsonl` | 41,175 | 12.63 | 1 row per outbound route shipment |
+| `sfs_demo.inventory_snapshots` | `data/inventory_snapshots.jsonl` | 2,301,600 | 281.29 | Daily `DC x SKU` end-of-day inventory snapshot |
 | **Total** | | **2,693,507** | **373.18** | |
+
+---
+
+## BigQuery Partitioning & Clustering Strategy
+
+All high-volume fact and line-item tables in [`sql/schema.sql`](sql/schema.sql) are partitioned by their primary event date (`DAY` granularity) and clustered on high-cardinality filter/join keys (`dc_id`, `sku`, `customer_id`, `supplier_id`, `route_id`) to minimize bytes scanned by analytical queries and AI agents:
+
+| Table | Time Partitioning (`DAY`) | Clustered Columns | Rationale |
+|---|---|---|---|
+| `sfs_demo.inventory_snapshots` | `snapshot_date` | `dc_id, sku` | Largest table (`2.30M` rows). Date-range queries over DC inventory positions and SKU stockout rates prune partitions by `snapshot_date` and co-locate blocks by `dc_id` and `sku`. |
+| `sfs_demo.order_lines` | `order_date` | `dc_id, sku, customer_id` | Denormalized `order_date`, `dc_id`, and `customer_id` onto line items (`251k` rows) so seasonal category demand, DC case fill rates, and customer SKU history scan only relevant dates and blocks without expensive header joins. |
+| `sfs_demo.po_lines` | `order_date` | `dc_id, sku` | Denormalized `order_date` and `dc_id` onto replenishment lines (`39.9k` rows) for fast inbound SKU receipt and short-ship analysis by date window, facility, and item. |
+| `sfs_demo.shipments` | `DATE(scheduled_delivery)` | `dc_id, customer_id, route_id` | Partitioned by scheduled delivery date (extracted from `TIMESTAMP`) and clustered by `dc_id`, `customer_id`, and `route_id` to accelerate cold-chain temperature excursion and route on-time investigations. |
+| `sfs_demo.orders` | `order_date` | `dc_id, customer_id` | Optimizes order-level fill rate rollups by DC and customer churn cohort windowing (`final 8 weeks` vs `prior 70 weeks`). |
+| `sfs_demo.purchase_orders` | `order_date` | `dc_id, supplier_id` | Optimizes supplier lead-time degradation comparisons across quarters (`Q1–Q5` vs `Q6`) and DC receiving analytics. |
+| `sfs_demo.accounts_payable` | `payment_date` | `supplier_id` | Optimizes treasury disbursement audits and supplier remittance lookups by date and payee. |
+| `sfs_demo.products` | *(None — 600 rows)* | `sku, category, temp_zone` | Dimension table clustered for category and temperature-zone filtering. |
+| `sfs_demo.customers` | *(None — 400 rows)* | `assigned_dc_id, customer_id, segment` | Dimension table clustered for regional DC and operator segment lookups. |
+| `sfs_demo.customer_contacts` | *(None — 743 rows)* | `customer_id` | Co-locates contact records by parent customer account. |
 
 ---
 
 ## Schema Reference (Every Table & Column)
 
-All DDL definitions reside in [`sql/schema.sql`](sql/schema.sql) under the `sfs` dataset schema.
+All DDL definitions reside in [`sql/schema.sql`](sql/schema.sql) under the `sfs_demo` dataset schema (location `US`).
 
-### 1. `sfs.suppliers`
+### 1. `sfs_demo.suppliers`
 Foodservice product manufacturers, growers, and processors supplying SFS distribution centers.
 
 | Column | BigQuery Type | Nullable | Description |
@@ -84,7 +113,7 @@ Foodservice product manufacturers, growers, and processors supplying SFS distrib
 | `reliability_profile` | `STRING` | `NOT NULL` | Reliability tier (`tier_1_reliable`, `standard`, `variable`, `degrading_last_quarter`) |
 | `baseline_on_time_rate` | `FLOAT64` | `NOT NULL` | Historical baseline on-time delivery probability (`0.84`–`0.98`) |
 
-### 2. `sfs.distribution_centers`
+### 2. `sfs_demo.distribution_centers`
 Regional broadline distribution centers operated by Stark Food Services.
 
 | Column | BigQuery Type | Nullable | Description |
@@ -97,7 +126,7 @@ Regional broadline distribution centers operated by Stark Food Services.
 | `capacity_cases` | `INT64` | `NOT NULL` | Total storage capacity in cases across all temperature zones |
 | `cold_storage_capacity_cases` | `INT64` | `NOT NULL` | Combined refrigerated and frozen storage capacity in cases |
 
-### 3. `sfs.products`
+### 3. `sfs_demo.products`
 Master catalog of 600 foodservice SKUs across 7 categories and 3 temperature zones.
 
 | Column | BigQuery Type | Nullable | Description |
@@ -111,10 +140,10 @@ Master catalog of 600 foodservice SKUs across 7 categories and 3 temperature zon
 | `list_price` | `NUMERIC(10,2)` | `NOT NULL` | Standard operator list price per case in USD |
 | `temp_zone` | `STRING` | `NOT NULL` | Required storage/transport temperature zone (`ambient`, `refrigerated`, `frozen`) |
 | `shelf_life_days` | `INT64` | `NOT NULL` | Expected shelf life in calendar days from receipt |
-| `primary_supplier_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.suppliers.supplier_id` |
-| `substitute_sku` | `STRING` | `NULL` | Foreign key to `sfs.products.sku` within the same category and temperature zone |
+| `primary_supplier_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.suppliers.supplier_id` |
+| `substitute_sku` | `STRING` | `NULL` | Foreign key to `sfs_demo.products.sku` within the same category and temperature zone |
 
-### 4. `sfs.customers`
+### 4. `sfs_demo.customers`
 Foodservice operator customer accounts (400 operators across 4 segments).
 
 | Column | BigQuery Type | Nullable | Description |
@@ -124,30 +153,30 @@ Foodservice operator customer accounts (400 operators across 4 segments).
 | `segment` | `STRING` | `NOT NULL` | Market segment: `restaurant`, `healthcare`, `education`, `hospitality` |
 | `region` | `STRING` | `NOT NULL` | Customer geographic region |
 | `credit_terms` | `STRING` | `NOT NULL` | Contracted payment terms (`Net 15`, `Net 30`, `Net 45`, `COD`) |
-| `assigned_dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.distribution_centers.dc_id` |
+| `assigned_dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` |
 | `account_open_date` | `DATE` | `NOT NULL` | Date the operator account was established (`YYYY-MM-DD`) |
 
-### 5. `sfs.customer_contacts` *(Intentionally PII-Bearing)*
+### 5. `sfs_demo.customer_contacts` *(Intentionally PII-Bearing)*
 Customer contact directory containing personal identifiers for data-governance and column-masking demonstrations.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
 | `contact_id` | `STRING` | `NOT NULL` | Primary key (`CONT-00001` .. `CONT-00743`) |
-| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.customers.customer_id` |
+| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.customers.customer_id` |
 | `name` | `STRING` | `NOT NULL` | **PII**: Full name of the customer contact |
 | `email` | `STRING` | `NOT NULL` | **PII**: Direct email address of the contact |
 | `phone` | `STRING` | `NOT NULL` | **PII**: Direct US telephone number (`+1-AAA-555-XXXX`) |
 | `role` | `STRING` | `NOT NULL` | Job title (`Executive Chef`, `Director of Purchasing`, `Kitchen Manager`, `Food & Beverage Director`, `Accounts Payable Lead`, `General Manager`) |
 | `is_primary` | `BOOL` | `NOT NULL` | `true` for the primary contact on the customer account |
 
-### 6. `sfs.purchase_orders`
+### 6. `sfs_demo.purchase_orders`
 Inbound replenishment purchase order headers from suppliers to SFS distribution centers.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
 | `po_id` | `STRING` | `NOT NULL` | Primary key (`PO-000001` .. `PO-008848`) |
-| `supplier_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.suppliers.supplier_id` |
-| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.distribution_centers.dc_id` |
+| `supplier_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.suppliers.supplier_id` |
+| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` |
 | `order_date` | `DATE` | `NOT NULL` | Date PO was issued to supplier |
 | `expected_delivery_date` | `DATE` | `NOT NULL` | Scheduled delivery date (`order_date + contracted_lead_time_days`) |
 | `actual_delivery_date` | `DATE` | `NOT NULL` | Actual dock receipt date (`order_date + actual_lead_time_days`) |
@@ -158,28 +187,30 @@ Inbound replenishment purchase order headers from suppliers to SFS distribution 
 | `total_received_cases` | `INT64` | `NOT NULL` | Total cases received across all lines on the PO |
 | `total_cost` | `NUMERIC(12,2)` | `NOT NULL` | Total landed cost of received cases in USD |
 
-### 7. `sfs.po_lines`
+### 7. `sfs_demo.po_lines`
 Line-item detail for inbound supplier replenishment purchase orders.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
-| `po_line_id` | `STRING` | `NOT NULL` | Primary key (`POL-0000001` .. `POL-0039797`) |
-| `po_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.purchase_orders.po_id` |
+| `po_line_id` | `STRING` | `NOT NULL` | Primary key (`POL-0000001` .. `POL-0039936`) |
+| `po_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.purchase_orders.po_id` |
+| `order_date` | `DATE` | `NOT NULL` | Date parent PO was issued (partition key) |
+| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` (cluster key) |
 | `line_number` | `INT64` | `NOT NULL` | Sequential line number within the PO |
-| `sku` | `STRING` | `NOT NULL` | Foreign key to `sfs.products.sku` |
+| `sku` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.products.sku` |
 | `ordered_cases` | `INT64` | `NOT NULL` | Cases ordered on this PO line |
 | `received_cases` | `INT64` | `NOT NULL` | Cases actually received at the DC dock |
 | `case_cost` | `NUMERIC(10,2)` | `NOT NULL` | Unit wholesale cost per case in USD |
 | `line_cost` | `NUMERIC(12,2)` | `NOT NULL` | Extended cost (`received_cases * case_cost`) in USD |
 
-### 8. `sfs.accounts_payable` *(Intentionally Sensitive Financial Records)*
+### 8. `sfs_demo.accounts_payable` *(Intentionally Sensitive Financial Records)*
 Supplier remittance and banking records designed for column-level security, policy tag, and DLP governance demos.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
 | `remittance_id` | `STRING` | `NOT NULL` | Primary key (`AP-000001` .. `AP-008848`) |
-| `po_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.purchase_orders.po_id` |
-| `supplier_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.suppliers.supplier_id` |
+| `po_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.purchase_orders.po_id` |
+| `supplier_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.suppliers.supplier_id` |
 | `invoice_number` | `STRING` | `NOT NULL` | Supplier invoice reference number |
 | `invoice_date` | `DATE` | `NOT NULL` | Invoice date (matches PO actual receipt date) |
 | `payment_date` | `DATE` | `NOT NULL` | Date electronic remittance was disbursed |
@@ -191,26 +222,26 @@ Supplier remittance and banking records designed for column-level security, poli
 | `supplier_tax_id` | `STRING` | `NOT NULL` | **SENSITIVE**: Supplier federal EIN (`XX-XXXXXXX`) |
 | `remittance_email` | `STRING` | `NOT NULL` | **SENSITIVE**: Supplier treasury/remittance advice email |
 
-### 9. `sfs.inventory_snapshots`
+### 9. `sfs_demo.inventory_snapshots`
 Daily end-of-day inventory position across all 7 DCs and 600 SKUs over 548 days (`2,301,600` rows).
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
 | `snapshot_date` | `DATE` | `NOT NULL` | Calendar date of end-of-day snapshot (`2025-04-01` .. `2026-09-30`) |
-| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.distribution_centers.dc_id` |
-| `sku` | `STRING` | `NOT NULL` | Foreign key to `sfs.products.sku` |
+| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` |
+| `sku` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.products.sku` |
 | `on_hand_cases` | `INT64` | `NOT NULL` | Physical cases available on hand at end of day |
 | `safety_stock` | `INT64` | `NOT NULL` | Target minimum safety stock buffer in cases |
 | `days_of_supply` | `FLOAT64` | `NOT NULL` | Estimated days of supply based on trailing daily demand rate |
 
-### 10. `sfs.orders`
+### 10. `sfs_demo.orders`
 Customer outbound sales order headers.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
 | `order_id` | `STRING` | `NOT NULL` | Primary key (`ORD-0000001` .. `ORD-0041175`) |
-| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.customers.customer_id` |
-| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.distribution_centers.dc_id` |
+| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.customers.customer_id` |
+| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` |
 | `order_date` | `DATE` | `NOT NULL` | Date customer placed the order |
 | `scheduled_delivery_date` | `DATE` | `NOT NULL` | Scheduled customer delivery date |
 | `order_status` | `STRING` | `NOT NULL` | Order fulfillment status (`FILLED`, `SHORT_SHIPPED`) |
@@ -219,31 +250,34 @@ Customer outbound sales order headers.
 | `case_fill_rate` | `FLOAT64` | `NOT NULL` | Ratio `shipped_cases / ordered_cases` (`0.0`–`1.0`) |
 | `order_total` | `NUMERIC(12,2)` | `NOT NULL` | Total invoiced order amount in USD for shipped cases |
 
-### 11. `sfs.order_lines`
+### 11. `sfs_demo.order_lines`
 Customer order line items (`250,272` rows) tracking ordered vs. shipped cases, out-of-stocks, and substitutions.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
-| `order_line_id` | `STRING` | `NOT NULL` | Primary key (`OL-0000001` .. `OL-0250272`) |
-| `order_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.orders.order_id` |
+| `order_line_id` | `STRING` | `NOT NULL` | Primary key (`OL-0000001` .. `OL-0251052`) |
+| `order_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.orders.order_id` |
+| `order_date` | `DATE` | `NOT NULL` | Date customer placed the parent order (partition key) |
+| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` (cluster key) |
+| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.customers.customer_id` (cluster key) |
 | `line_number` | `INT64` | `NOT NULL` | Sequential line number within the order |
-| `sku` | `STRING` | `NOT NULL` | Foreign key to `sfs.products.sku` (originally ordered SKU) |
+| `sku` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.products.sku` (originally ordered SKU) |
 | `ordered_cases` | `INT64` | `NOT NULL` | Number of cases requested by customer |
 | `shipped_cases` | `INT64` | `NOT NULL` | Number of cases actually shipped (`0` when `OUT_OF_STOCK`) |
 | `fill_status` | `STRING` | `NOT NULL` | Line outcome: `FILLED`, `PARTIAL`, `OUT_OF_STOCK`, `SUBSTITUTED` |
-| `substituted_sku` | `STRING` | `NULL` | Foreign key to `sfs.products.sku` when `fill_status = 'SUBSTITUTED'` (`NULL` otherwise) |
+| `substituted_sku` | `STRING` | `NULL` | Foreign key to `sfs_demo.products.sku` when `fill_status = 'SUBSTITUTED'` (`NULL` otherwise) |
 | `unit_price` | `NUMERIC(10,2)` | `NOT NULL` | Billed price per case in USD |
 | `line_total` | `NUMERIC(12,2)` | `NOT NULL` | Extended line total in USD (`shipped_cases * unit_price`) |
 
-### 12. `sfs.shipments`
+### 12. `sfs_demo.shipments`
 Outbound delivery shipments with route assignment, delivery timestamps, on-time flag, and cold-chain excursion telemetry.
 
 | Column | BigQuery Type | Nullable | Description |
 |---|---|---|---|
 | `shipment_id` | `STRING` | `NOT NULL` | Primary key (`SHP-0000001` .. `SHP-0041175`) |
-| `order_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.orders.order_id` |
-| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.distribution_centers.dc_id` |
-| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs.customers.customer_id` |
+| `order_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.orders.order_id` |
+| `dc_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.distribution_centers.dc_id` |
+| `customer_id` | `STRING` | `NOT NULL` | Foreign key to `sfs_demo.customers.customer_id` |
 | `route_id` | `STRING` | `NOT NULL` | Assigned delivery route identifier (42 routes across 7 DCs, e.g., `RTE-SW-404`) |
 | `load_temp_zone` | `STRING` | `NOT NULL` | Most stringent temperature zone required by the shipment (`ambient`, `refrigerated`, `frozen`) |
 | `scheduled_delivery` | `TIMESTAMP` | `NOT NULL` | Scheduled delivery appointment timestamp (ISO-8601 UTC) |

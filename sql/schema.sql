@@ -1,13 +1,14 @@
 -- Stark Food Services (SFS) — BigQuery Schema DDL
--- Dataset: sfs (project-agnostic; never hardcode project IDs in tracked files)
+-- Dataset: sfs_demo (project-agnostic; never hardcode project IDs in tracked files)
 
-CREATE SCHEMA IF NOT EXISTS sfs
+CREATE SCHEMA IF NOT EXISTS sfs_demo
 OPTIONS (
+  location = 'US',
   description = 'Stark Food Services (SFS) synthetic broadline foodservice supply-chain dataset'
 );
 
 -- 1. Suppliers
-CREATE OR REPLACE TABLE sfs.suppliers (
+CREATE OR REPLACE TABLE sfs_demo.suppliers (
   supplier_id STRING NOT NULL OPTIONS (description = 'Unique supplier identifier (e.g., SUP-001)'),
   name STRING NOT NULL OPTIONS (description = 'Legal or trade name of the foodservice supplier'),
   region STRING NOT NULL OPTIONS (description = 'US geographic region of supplier primary operations'),
@@ -22,7 +23,7 @@ OPTIONS (
 );
 
 -- 2. Distribution Centers
-CREATE OR REPLACE TABLE sfs.distribution_centers (
+CREATE OR REPLACE TABLE sfs_demo.distribution_centers (
   dc_id STRING NOT NULL OPTIONS (description = 'Unique distribution center identifier (e.g., DC-NE-01)'),
   name STRING NOT NULL OPTIONS (description = 'Distribution center facility name'),
   city STRING NOT NULL OPTIONS (description = 'Facility city'),
@@ -37,7 +38,7 @@ OPTIONS (
 );
 
 -- 3. Products
-CREATE OR REPLACE TABLE sfs.products (
+CREATE OR REPLACE TABLE sfs_demo.products (
   sku STRING NOT NULL OPTIONS (description = 'Unique stock keeping unit identifier (e.g., SKU-10001)'),
   description STRING NOT NULL OPTIONS (description = 'Commercial product description'),
   category STRING NOT NULL OPTIONS (description = 'Product category: produce, protein, dairy, dry, frozen, paper, chemical'),
@@ -50,15 +51,15 @@ CREATE OR REPLACE TABLE sfs.products (
   primary_supplier_id STRING NOT NULL OPTIONS (description = 'Primary replenishment supplier ID'),
   substitute_sku STRING OPTIONS (description = 'Designated substitute SKU within the same category when out of stock'),
   PRIMARY KEY (sku) NOT ENFORCED,
-  FOREIGN KEY (primary_supplier_id) REFERENCES sfs.suppliers(supplier_id) NOT ENFORCED
+  FOREIGN KEY (primary_supplier_id) REFERENCES sfs_demo.suppliers(supplier_id) NOT ENFORCED
 )
-CLUSTER BY category, temp_zone
+CLUSTER BY sku, category, temp_zone
 OPTIONS (
   description = 'Master catalog of ~600 foodservice SKUs across 7 categories and 3 temperature zones'
 );
 
 -- 4. Customers
-CREATE OR REPLACE TABLE sfs.customers (
+CREATE OR REPLACE TABLE sfs_demo.customers (
   customer_id STRING NOT NULL OPTIONS (description = 'Unique customer account identifier (e.g., CUST-0001)'),
   operator_name STRING NOT NULL OPTIONS (description = 'Foodservice operator business or institution name'),
   segment STRING NOT NULL OPTIONS (description = 'Customer market segment: restaurant, healthcare, education, hospitality'),
@@ -67,15 +68,15 @@ CREATE OR REPLACE TABLE sfs.customers (
   assigned_dc_id STRING NOT NULL OPTIONS (description = 'Primary servicing SFS distribution center ID'),
   account_open_date DATE NOT NULL OPTIONS (description = 'Date the operator account was established'),
   PRIMARY KEY (customer_id) NOT ENFORCED,
-  FOREIGN KEY (assigned_dc_id) REFERENCES sfs.distribution_centers(dc_id) NOT ENFORCED
+  FOREIGN KEY (assigned_dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED
 )
-CLUSTER BY assigned_dc_id, segment
+CLUSTER BY assigned_dc_id, customer_id, segment
 OPTIONS (
   description = 'Foodservice operator customer accounts serviced by SFS'
 );
 
 -- 5. Customer Contacts (PII-bearing)
-CREATE OR REPLACE TABLE sfs.customer_contacts (
+CREATE OR REPLACE TABLE sfs_demo.customer_contacts (
   contact_id STRING NOT NULL OPTIONS (description = 'Unique contact record identifier (e.g., CONT-00001)'),
   customer_id STRING NOT NULL OPTIONS (description = 'Associated customer account ID'),
   name STRING NOT NULL OPTIONS (description = 'PII: Full name of the customer contact'),
@@ -84,14 +85,15 @@ CREATE OR REPLACE TABLE sfs.customer_contacts (
   role STRING NOT NULL OPTIONS (description = 'Job role (Executive Chef, Kitchen Manager, Purchasing Director, AP Lead, GM)'),
   is_primary BOOL NOT NULL OPTIONS (description = 'Whether this contact is the primary account contact'),
   PRIMARY KEY (contact_id) NOT ENFORCED,
-  FOREIGN KEY (customer_id) REFERENCES sfs.customers(customer_id) NOT ENFORCED
+  FOREIGN KEY (customer_id) REFERENCES sfs_demo.customers(customer_id) NOT ENFORCED
 )
+CLUSTER BY customer_id
 OPTIONS (
   description = 'PII-bearing customer contact directory for data governance and masking demonstrations'
 );
 
 -- 6. Purchase Orders (Supplier -> DC Replenishment Header)
-CREATE OR REPLACE TABLE sfs.purchase_orders (
+CREATE OR REPLACE TABLE sfs_demo.purchase_orders (
   po_id STRING NOT NULL OPTIONS (description = 'Unique purchase order identifier (e.g., PO-000001)'),
   supplier_id STRING NOT NULL OPTIONS (description = 'Replenishment supplier ID'),
   dc_id STRING NOT NULL OPTIONS (description = 'Receiving SFS distribution center ID'),
@@ -105,8 +107,8 @@ CREATE OR REPLACE TABLE sfs.purchase_orders (
   total_received_cases INT64 NOT NULL OPTIONS (description = 'Total cases received across all lines on the PO'),
   total_cost NUMERIC(12, 2) NOT NULL OPTIONS (description = 'Total landed cost of received cases in USD'),
   PRIMARY KEY (po_id) NOT ENFORCED,
-  FOREIGN KEY (supplier_id) REFERENCES sfs.suppliers(supplier_id) NOT ENFORCED,
-  FOREIGN KEY (dc_id) REFERENCES sfs.distribution_centers(dc_id) NOT ENFORCED
+  FOREIGN KEY (supplier_id) REFERENCES sfs_demo.suppliers(supplier_id) NOT ENFORCED,
+  FOREIGN KEY (dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED
 )
 PARTITION BY order_date
 CLUSTER BY dc_id, supplier_id
@@ -115,9 +117,11 @@ OPTIONS (
 );
 
 -- 7. Purchase Order Lines
-CREATE OR REPLACE TABLE sfs.po_lines (
+CREATE OR REPLACE TABLE sfs_demo.po_lines (
   po_line_id STRING NOT NULL OPTIONS (description = 'Unique purchase order line identifier (e.g., POL-0000001)'),
   po_id STRING NOT NULL OPTIONS (description = 'Parent purchase order ID'),
+  order_date DATE NOT NULL OPTIONS (description = 'Date parent PO was issued to supplier'),
+  dc_id STRING NOT NULL OPTIONS (description = 'Receiving SFS distribution center ID'),
   line_number INT64 NOT NULL OPTIONS (description = 'Sequential line number within the PO'),
   sku STRING NOT NULL OPTIONS (description = 'Replenished product SKU'),
   ordered_cases INT64 NOT NULL OPTIONS (description = 'Cases ordered on this PO line'),
@@ -125,16 +129,18 @@ CREATE OR REPLACE TABLE sfs.po_lines (
   case_cost NUMERIC(10, 2) NOT NULL OPTIONS (description = 'Unit wholesale cost per case in USD'),
   line_cost NUMERIC(12, 2) NOT NULL OPTIONS (description = 'Extended cost for received cases in USD'),
   PRIMARY KEY (po_line_id) NOT ENFORCED,
-  FOREIGN KEY (po_id) REFERENCES sfs.purchase_orders(po_id) NOT ENFORCED,
-  FOREIGN KEY (sku) REFERENCES sfs.products(sku) NOT ENFORCED
+  FOREIGN KEY (po_id) REFERENCES sfs_demo.purchase_orders(po_id) NOT ENFORCED,
+  FOREIGN KEY (dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED,
+  FOREIGN KEY (sku) REFERENCES sfs_demo.products(sku) NOT ENFORCED
 )
-CLUSTER BY po_id, sku
+PARTITION BY order_date
+CLUSTER BY dc_id, sku
 OPTIONS (
   description = 'Line-item detail for inbound supplier purchase orders'
 );
 
 -- 8. Accounts Payable (Sensitive financial / remittance records)
-CREATE OR REPLACE TABLE sfs.accounts_payable (
+CREATE OR REPLACE TABLE sfs_demo.accounts_payable (
   remittance_id STRING NOT NULL OPTIONS (description = 'Unique AP remittance identifier (e.g., AP-000001)'),
   po_id STRING NOT NULL OPTIONS (description = 'Associated purchase order ID'),
   supplier_id STRING NOT NULL OPTIONS (description = 'Payee supplier ID'),
@@ -149,8 +155,8 @@ CREATE OR REPLACE TABLE sfs.accounts_payable (
   supplier_tax_id STRING NOT NULL OPTIONS (description = 'SENSITIVE: Supplier federal EIN / tax identification number'),
   remittance_email STRING NOT NULL OPTIONS (description = 'SENSITIVE: Supplier treasury/AP remittance advice email'),
   PRIMARY KEY (remittance_id) NOT ENFORCED,
-  FOREIGN KEY (po_id) REFERENCES sfs.purchase_orders(po_id) NOT ENFORCED,
-  FOREIGN KEY (supplier_id) REFERENCES sfs.suppliers(supplier_id) NOT ENFORCED
+  FOREIGN KEY (po_id) REFERENCES sfs_demo.purchase_orders(po_id) NOT ENFORCED,
+  FOREIGN KEY (supplier_id) REFERENCES sfs_demo.suppliers(supplier_id) NOT ENFORCED
 )
 PARTITION BY payment_date
 CLUSTER BY supplier_id
@@ -159,7 +165,7 @@ OPTIONS (
 );
 
 -- 9. Inventory Snapshots (Daily DC x SKU position)
-CREATE OR REPLACE TABLE sfs.inventory_snapshots (
+CREATE OR REPLACE TABLE sfs_demo.inventory_snapshots (
   snapshot_date DATE NOT NULL OPTIONS (description = 'Calendar date of end-of-day inventory snapshot'),
   dc_id STRING NOT NULL OPTIONS (description = 'Distribution center ID'),
   sku STRING NOT NULL OPTIONS (description = 'Product SKU'),
@@ -167,8 +173,8 @@ CREATE OR REPLACE TABLE sfs.inventory_snapshots (
   safety_stock INT64 NOT NULL OPTIONS (description = 'Target minimum safety stock buffer in cases'),
   days_of_supply FLOAT64 NOT NULL OPTIONS (description = 'Estimated days of supply based on trailing daily demand rate'),
   PRIMARY KEY (snapshot_date, dc_id, sku) NOT ENFORCED,
-  FOREIGN KEY (dc_id) REFERENCES sfs.distribution_centers(dc_id) NOT ENFORCED,
-  FOREIGN KEY (sku) REFERENCES sfs.products(sku) NOT ENFORCED
+  FOREIGN KEY (dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED,
+  FOREIGN KEY (sku) REFERENCES sfs_demo.products(sku) NOT ENFORCED
 )
 PARTITION BY snapshot_date
 CLUSTER BY dc_id, sku
@@ -177,7 +183,7 @@ OPTIONS (
 );
 
 -- 10. Customer Orders (Header)
-CREATE OR REPLACE TABLE sfs.orders (
+CREATE OR REPLACE TABLE sfs_demo.orders (
   order_id STRING NOT NULL OPTIONS (description = 'Unique customer sales order identifier (e.g., ORD-0000001)'),
   customer_id STRING NOT NULL OPTIONS (description = 'Ordering customer account ID'),
   dc_id STRING NOT NULL OPTIONS (description = 'Fulfilling SFS distribution center ID'),
@@ -189,8 +195,8 @@ CREATE OR REPLACE TABLE sfs.orders (
   case_fill_rate FLOAT64 NOT NULL OPTIONS (description = 'Order-level case fill ratio (shipped_cases / ordered_cases)'),
   order_total NUMERIC(12, 2) NOT NULL OPTIONS (description = 'Total invoiced order amount in USD for shipped cases'),
   PRIMARY KEY (order_id) NOT ENFORCED,
-  FOREIGN KEY (customer_id) REFERENCES sfs.customers(customer_id) NOT ENFORCED,
-  FOREIGN KEY (dc_id) REFERENCES sfs.distribution_centers(dc_id) NOT ENFORCED
+  FOREIGN KEY (customer_id) REFERENCES sfs_demo.customers(customer_id) NOT ENFORCED,
+  FOREIGN KEY (dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED
 )
 PARTITION BY order_date
 CLUSTER BY dc_id, customer_id
@@ -199,9 +205,12 @@ OPTIONS (
 );
 
 -- 11. Customer Order Lines
-CREATE OR REPLACE TABLE sfs.order_lines (
+CREATE OR REPLACE TABLE sfs_demo.order_lines (
   order_line_id STRING NOT NULL OPTIONS (description = 'Unique customer order line identifier (e.g., OL-0000001)'),
   order_id STRING NOT NULL OPTIONS (description = 'Parent customer order ID'),
+  order_date DATE NOT NULL OPTIONS (description = 'Date customer placed the parent order'),
+  dc_id STRING NOT NULL OPTIONS (description = 'Fulfilling SFS distribution center ID'),
+  customer_id STRING NOT NULL OPTIONS (description = 'Ordering customer account ID'),
   line_number INT64 NOT NULL OPTIONS (description = 'Sequential line number within the order'),
   sku STRING NOT NULL OPTIONS (description = 'Originally ordered product SKU'),
   ordered_cases INT64 NOT NULL OPTIONS (description = 'Number of cases requested by customer'),
@@ -211,17 +220,20 @@ CREATE OR REPLACE TABLE sfs.order_lines (
   unit_price NUMERIC(10, 2) NOT NULL OPTIONS (description = 'Billed price per case in USD'),
   line_total NUMERIC(12, 2) NOT NULL OPTIONS (description = 'Extended line total in USD (shipped_cases * unit_price)'),
   PRIMARY KEY (order_line_id) NOT ENFORCED,
-  FOREIGN KEY (order_id) REFERENCES sfs.orders(order_id) NOT ENFORCED,
-  FOREIGN KEY (sku) REFERENCES sfs.products(sku) NOT ENFORCED,
-  FOREIGN KEY (substituted_sku) REFERENCES sfs.products(sku) NOT ENFORCED
+  FOREIGN KEY (order_id) REFERENCES sfs_demo.orders(order_id) NOT ENFORCED,
+  FOREIGN KEY (dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED,
+  FOREIGN KEY (customer_id) REFERENCES sfs_demo.customers(customer_id) NOT ENFORCED,
+  FOREIGN KEY (sku) REFERENCES sfs_demo.products(sku) NOT ENFORCED,
+  FOREIGN KEY (substituted_sku) REFERENCES sfs_demo.products(sku) NOT ENFORCED
 )
-CLUSTER BY order_id, sku
+PARTITION BY order_date
+CLUSTER BY dc_id, sku, customer_id
 OPTIONS (
   description = 'Customer order line items (~250k rows) tracking ordered vs. shipped cases, OOS, and substitutions'
 );
 
 -- 12. Shipments (Outbound Route & Cold-Chain Telemetry)
-CREATE OR REPLACE TABLE sfs.shipments (
+CREATE OR REPLACE TABLE sfs_demo.shipments (
   shipment_id STRING NOT NULL OPTIONS (description = 'Unique outbound shipment identifier (e.g., SHP-0000001)'),
   order_id STRING NOT NULL OPTIONS (description = 'Fulfilled customer order ID'),
   dc_id STRING NOT NULL OPTIONS (description = 'Origin SFS distribution center ID'),
@@ -234,11 +246,12 @@ CREATE OR REPLACE TABLE sfs.shipments (
   temperature_excursion BOOL OPTIONS (description = 'For refrigerated/frozen loads, True if reefer temp exceeded threshold; NULL for ambient loads'),
   peak_temp_f FLOAT64 OPTIONS (description = 'Peak compartment temperature (°F) recorded during transit for cold-chain loads; NULL for ambient'),
   PRIMARY KEY (shipment_id) NOT ENFORCED,
-  FOREIGN KEY (order_id) REFERENCES sfs.orders(order_id) NOT ENFORCED,
-  FOREIGN KEY (dc_id) REFERENCES sfs.distribution_centers(dc_id) NOT ENFORCED,
-  FOREIGN KEY (customer_id) REFERENCES sfs.customers(customer_id) NOT ENFORCED
+  FOREIGN KEY (order_id) REFERENCES sfs_demo.orders(order_id) NOT ENFORCED,
+  FOREIGN KEY (dc_id) REFERENCES sfs_demo.distribution_centers(dc_id) NOT ENFORCED,
+  FOREIGN KEY (customer_id) REFERENCES sfs_demo.customers(customer_id) NOT ENFORCED
 )
-CLUSTER BY dc_id, route_id
+PARTITION BY DATE(scheduled_delivery)
+CLUSTER BY dc_id, customer_id, route_id
 OPTIONS (
   description = 'Outbound delivery shipments with route assignment, on-time performance, and cold-chain excursion flags'
 );
