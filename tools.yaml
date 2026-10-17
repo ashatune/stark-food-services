@@ -1,0 +1,429 @@
+# Stark Food Services (SFS) — MCP Toolbox for Databases Configuration
+# Exposes a least-privilege analytical & action tool surface over BigQuery dataset sfs_demo.
+# Deliberately excludes sfs_demo.accounts_payable and all PII columns (name, email, phone)
+# from sfs_demo.customer_contacts.
+
+sources:
+  sfs-bq:
+    kind: bigquery
+    project: hasha-gemini-proj1
+    location: US
+    writeMode: allowed
+    allowedDatasets:
+      - sfs_demo
+    maxQueryResultRows: 50
+    maximumBytesBilled: 250000000
+
+tools:
+  supplier_lead_time_performance:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Compare each supplier's contracted replenishment lead time against actual
+      delivery lead time over the trailing lookback_days window (anchored to the
+      latest purchase order date in sfs_demo), returning worst offenders first
+      by lead-time overrun and late receipt rate.
+    parameters:
+      - name: lookback_days
+        type: integer
+        description: Number of trailing days of purchase order history to evaluate (e.g., 90 for the final quarter).
+    statement: |
+      WITH bounds AS (
+        SELECT MAX(order_date) AS max_order_date
+        FROM `sfs_demo.purchase_orders`
+      )
+      SELECT
+        s.supplier_id,
+        s.name AS supplier_name,
+        s.primary_category,
+        s.region,
+        s.contracted_lead_time_days,
+        COUNT(po.po_id) AS po_count,
+        ROUND(AVG(po.actual_lead_time_days), 2) AS avg_actual_lead_time_days,
+        ROUND(AVG(po.actual_lead_time_days - s.contracted_lead_time_days), 2) AS avg_days_over_contract,
+        ROUND(100.0 * (AVG(po.actual_lead_time_days) / s.contracted_lead_time_days - 1.0), 1) AS pct_over_contract,
+        ROUND(100.0 * COUNTIF(po.status = 'LATE_RECEIVED') / COUNT(*), 1) AS late_po_rate_pct,
+        ROUND(100.0 * (1.0 - SAFE_DIVIDE(SUM(po.total_received_cases), SUM(po.total_ordered_cases))), 1) AS short_ship_case_rate_pct
+      FROM `sfs_demo.suppliers` s
+      JOIN `sfs_demo.purchase_orders` po
+        ON s.supplier_id = po.supplier_id
+      CROSS JOIN bounds b
+      WHERE po.order_date > DATE_SUB(b.max_order_date, INTERVAL @lookback_days DAY)
+      GROUP BY
+        s.supplier_id,
+        s.name,
+        s.primary_category,
+        s.region,
+        s.contracted_lead_time_days
+      ORDER BY avg_days_over_contract DESC, pct_over_contract DESC
+      LIMIT 25;
+
+  dc_fill_rate:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Calculate outbound customer case fill rate, short-shipped order rate, and
+      invoiced order volume by distribution center for a given calendar month
+      (YYYY-MM, e.g., '2026-08'), optionally filtered to a single dc_id.
+    parameters:
+      - name: month
+        type: string
+        description: Calendar month in YYYY-MM format (between 2025-04 and 2026-09, e.g., '2026-08').
+      - name: dc_id
+        type: string
+        required: false
+        description: Optional distribution center ID filter (e.g., 'DC-SE-01'). Omit to compare all DCs.
+    statement: |
+      SELECT
+        dc.dc_id,
+        dc.name AS dc_name,
+        dc.city,
+        dc.state,
+        dc.region,
+        @month AS month,
+        COUNT(o.order_id) AS total_orders,
+        SUM(o.ordered_cases) AS ordered_cases,
+        SUM(o.shipped_cases) AS shipped_cases,
+        ROUND(100.0 * SAFE_DIVIDE(SUM(o.shipped_cases), SUM(o.ordered_cases)), 2) AS case_fill_rate_pct,
+        ROUND(100.0 * COUNTIF(o.order_status = 'SHORT_SHIPPED') / COUNT(o.order_id), 2) AS short_shipped_orders_pct,
+        ROUND(SUM(o.order_total), 2) AS invoiced_revenue_usd
+      FROM `sfs_demo.distribution_centers` dc
+      JOIN `sfs_demo.orders` o
+        ON dc.dc_id = o.dc_id
+      WHERE o.order_date BETWEEN PARSE_DATE('%Y-%m', @month) AND LAST_DAY(PARSE_DATE('%Y-%m', @month))
+        AND (@dc_id IS NULL OR @dc_id = '' OR dc.dc_id = @dc_id)
+      GROUP BY dc.dc_id, dc.name, dc.city, dc.state, dc.region
+      ORDER BY case_fill_rate_pct ASC
+      LIMIT 10;
+
+  stockout_risk_skus:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Identify SKUs at a given distribution center (dc_id) whose end-of-day
+      inventory position on the latest snapshot date has days_of_supply at or
+      below days_of_supply_threshold, enriched with product and primary supplier
+      details to guide replenishment drafts.
+    parameters:
+      - name: dc_id
+        type: string
+        description: Distribution center ID to inspect (e.g., 'DC-SE-01').
+      - name: days_of_supply_threshold
+        type: float
+        description: Maximum days of supply threshold to flag at-risk SKUs (e.g., 3.0).
+    statement: |
+      SELECT
+        i.snapshot_date,
+        i.dc_id,
+        i.sku,
+        p.description AS product_description,
+        p.category,
+        p.temp_zone,
+        i.on_hand_cases,
+        i.safety_stock,
+        i.days_of_supply,
+        GREATEST(i.safety_stock * 2 - i.on_hand_cases, i.safety_stock) AS recommended_replenish_cases,
+        p.primary_supplier_id,
+        s.name AS supplier_name,
+        s.contracted_lead_time_days
+      FROM `sfs_demo.inventory_snapshots` i
+      JOIN `sfs_demo.products` p
+        ON i.sku = p.sku
+      JOIN `sfs_demo.suppliers` s
+        ON p.primary_supplier_id = s.supplier_id
+      WHERE i.snapshot_date = DATE '2026-09-30'
+        AND i.dc_id = @dc_id
+        AND i.days_of_supply <= @days_of_supply_threshold
+      ORDER BY i.days_of_supply ASC, i.on_hand_cases ASC
+      LIMIT 25;
+
+  cold_chain_excursions:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Aggregate outbound refrigerated and frozen shipments between start_date
+      and end_date (YYYY-MM-DD) by delivery route and origin distribution center,
+      surfacing cold-chain temperature excursion counts, excursion rates, and
+      peak compartment temperatures.
+    parameters:
+      - name: start_date
+        type: string
+        description: Start date in YYYY-MM-DD format (e.g., '2026-04-01').
+      - name: end_date
+        type: string
+        description: End date in YYYY-MM-DD format (e.g., '2026-09-30').
+    statement: |
+      SELECT
+        s.route_id,
+        s.dc_id,
+        dc.city AS dc_city,
+        dc.region AS dc_region,
+        COUNT(*) AS cold_chain_loads,
+        COUNTIF(s.temperature_excursion) AS excursion_loads,
+        ROUND(100.0 * COUNTIF(s.temperature_excursion) / COUNT(*), 2) AS excursion_rate_pct,
+        ROUND(AVG(IF(s.temperature_excursion, s.peak_temp_f, NULL)), 1) AS avg_excursion_peak_temp_f,
+        ROUND(MAX(s.peak_temp_f), 1) AS max_peak_temp_f,
+        ROUND(100.0 * COUNTIF(s.on_time) / COUNT(*), 2) AS on_time_delivery_pct
+      FROM `sfs_demo.shipments` s
+      JOIN `sfs_demo.distribution_centers` dc
+        ON s.dc_id = dc.dc_id
+      WHERE DATE(s.scheduled_delivery) BETWEEN PARSE_DATE('%Y-%m-%d', @start_date) AND PARSE_DATE('%Y-%m-%d', @end_date)
+        AND s.load_temp_zone IN ('refrigerated', 'frozen')
+      GROUP BY s.route_id, s.dc_id, dc.city, dc.region
+      ORDER BY excursion_rate_pct DESC, excursion_loads DESC
+      LIMIT 25;
+
+  churn_risk_customers:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Identify customer accounts whose average weekly ordered cases during the
+      trailing weeks window (anchored to the latest order date in sfs_demo)
+      dropped by at least pct_drop_threshold percent relative to their prior
+      baseline weekly average. Includes non-PII contact roles only.
+    parameters:
+      - name: weeks
+        type: integer
+        description: Number of trailing weeks to evaluate as the recent window (e.g., 8).
+      - name: pct_drop_threshold
+        type: float
+        description: Minimum percentage drop in weekly ordered cases (e.g., 50.0 for a >=50% drop).
+    statement: |
+      WITH bounds AS (
+        SELECT
+          MIN(order_date) AS min_date,
+          MAX(order_date) AS max_date,
+          DATE_SUB(MAX(order_date), INTERVAL (@weeks * 7 - 1) DAY) AS cutoff_date
+        FROM `sfs_demo.orders`
+      ),
+      contact_roles AS (
+        SELECT
+          customer_id,
+          STRING_AGG(DISTINCT role, ', ' ORDER BY role) AS contact_roles
+        FROM `sfs_demo.customer_contacts`
+        GROUP BY customer_id
+      ),
+      cust_volume AS (
+        SELECT
+          c.customer_id,
+          c.operator_name,
+          c.segment,
+          c.region,
+          c.assigned_dc_id,
+          cr.contact_roles,
+          ROUND(
+            SUM(IF(o.order_date < b.cutoff_date, o.ordered_cases, 0))
+            / GREATEST(DATE_DIFF(b.cutoff_date, b.min_date, DAY) / 7.0, 1.0),
+            1
+          ) AS baseline_cases_per_week,
+          ROUND(
+            SUM(IF(o.order_date >= b.cutoff_date, o.ordered_cases, 0))
+            / GREATEST(@weeks, 1),
+            1
+          ) AS recent_cases_per_week
+        FROM `sfs_demo.customers` c
+        CROSS JOIN bounds b
+        LEFT JOIN `sfs_demo.orders` o
+          ON c.customer_id = o.customer_id
+        LEFT JOIN contact_roles cr
+          ON c.customer_id = cr.customer_id
+        GROUP BY
+          c.customer_id,
+          c.operator_name,
+          c.segment,
+          c.region,
+          c.assigned_dc_id,
+          cr.contact_roles,
+          b.cutoff_date,
+          b.min_date
+      )
+      SELECT
+        customer_id,
+        operator_name,
+        segment,
+        region,
+        assigned_dc_id,
+        contact_roles,
+        baseline_cases_per_week,
+        recent_cases_per_week,
+        ROUND(100.0 * (1.0 - SAFE_DIVIDE(recent_cases_per_week, baseline_cases_per_week)), 1) AS pct_drop
+      FROM cust_volume
+      WHERE baseline_cases_per_week > 0
+        AND 100.0 * (1.0 - SAFE_DIVIDE(recent_cases_per_week, baseline_cases_per_week)) >= ABS(@pct_drop_threshold)
+      ORDER BY pct_drop DESC
+      LIMIT 25;
+
+  customer_order_summary:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Retrieve recent order history, fulfillment performance, and non-PII
+      account metadata (including contact roles only, excluding contact name,
+      email, and phone) for a specific customer_id.
+    parameters:
+      - name: customer_id
+        type: string
+        description: Customer account ID (e.g., 'CUST-0230').
+    statement: |
+      WITH contact_roles AS (
+        SELECT
+          customer_id,
+          STRING_AGG(DISTINCT role, ', ' ORDER BY role) AS contact_roles
+        FROM `sfs_demo.customer_contacts`
+        WHERE customer_id = @customer_id
+        GROUP BY customer_id
+      )
+      SELECT
+        c.customer_id,
+        c.operator_name,
+        c.segment,
+        c.region,
+        c.assigned_dc_id,
+        c.credit_terms,
+        cr.contact_roles,
+        o.order_id,
+        o.order_date,
+        o.scheduled_delivery_date,
+        o.order_status,
+        o.ordered_cases,
+        o.shipped_cases,
+        o.case_fill_rate,
+        o.order_total
+      FROM `sfs_demo.customers` c
+      JOIN `sfs_demo.orders` o
+        ON c.customer_id = o.customer_id
+      LEFT JOIN contact_roles cr
+        ON c.customer_id = cr.customer_id
+      WHERE c.customer_id = @customer_id
+      ORDER BY o.order_date DESC
+      LIMIT 15;
+
+  product_search:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Search the SFS product catalog by optional category (produce, protein,
+      dairy, dry, frozen, paper, chemical) and/or optional case-insensitive
+      keyword matching SKU, description, or brand.
+    parameters:
+      - name: category
+        type: string
+        required: false
+        description: Optional product category filter (produce, protein, dairy, dry, frozen, paper, chemical).
+      - name: keyword
+        type: string
+        required: false
+        description: Optional case-insensitive keyword matching SKU, description, or brand (e.g., 'Ribeye', 'Romaine').
+    statement: |
+      SELECT
+        p.sku,
+        p.description,
+        p.category,
+        p.brand,
+        p.pack_size,
+        p.case_cost,
+        p.list_price,
+        p.temp_zone,
+        p.shelf_life_days,
+        p.substitute_sku,
+        p.primary_supplier_id,
+        s.name AS primary_supplier_name
+      FROM `sfs_demo.products` p
+      JOIN `sfs_demo.suppliers` s
+        ON p.primary_supplier_id = s.supplier_id
+      WHERE (@category IS NULL OR @category = '' OR LOWER(p.category) = LOWER(@category))
+        AND (
+          @keyword IS NULL
+          OR @keyword = ''
+          OR CONTAINS_SUBSTR(p.description, @keyword)
+          OR CONTAINS_SUBSTR(p.brand, @keyword)
+          OR CONTAINS_SUBSTR(p.sku, @keyword)
+        )
+      ORDER BY p.sku ASC
+      LIMIT 25;
+
+  create_replenishment_draft:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Create an append-only replenishment draft request in
+      sfs_demo.replenishment_drafts for a distribution center (dc_id) and SKU
+      with the requested case quantity and analytical rationale.
+    parameters:
+      - name: dc_id
+        type: string
+        description: Target SFS distribution center ID (e.g., 'DC-SE-01').
+      - name: sku
+        type: string
+        description: Product SKU to replenish (e.g., 'SKU-10001').
+      - name: cases_requested
+        type: integer
+        description: Number of cases requested for replenishment.
+      - name: rationale
+        type: string
+        description: Analytical justification for the replenishment request.
+    statement: |
+      INSERT INTO `sfs_demo.replenishment_drafts` (
+        draft_id,
+        created_at,
+        dc_id,
+        sku,
+        cases_requested,
+        rationale,
+        created_by
+      )
+      VALUES (
+        GENERATE_UUID(),
+        CURRENT_TIMESTAMP(),
+        @dc_id,
+        @sku,
+        @cases_requested,
+        @rationale,
+        'sfs-mcp-toolbox'
+      );
+
+  flag_customer_for_outreach:
+    kind: bigquery-sql
+    source: sfs-bq
+    description: >-
+      Record an append-only customer outreach flag in sfs_demo.customer_flags
+      for account management follow-up (e.g., CHURN_RISK, SERVICE_RECOVERY).
+    parameters:
+      - name: customer_id
+        type: string
+        description: Customer account ID to flag (e.g., 'CUST-0230').
+      - name: flag_type
+        type: string
+        description: Outreach flag classification (e.g., 'CHURN_RISK', 'SERVICE_RECOVERY').
+      - name: note
+        type: string
+        description: Actionable context note for the account management team.
+    statement: |
+      INSERT INTO `sfs_demo.customer_flags` (
+        flag_id,
+        created_at,
+        customer_id,
+        flag_type,
+        note,
+        created_by
+      )
+      VALUES (
+        GENERATE_UUID(),
+        CURRENT_TIMESTAMP(),
+        @customer_id,
+        @flag_type,
+        @note,
+        'sfs-mcp-toolbox'
+      );
+
+toolsets:
+  sfs_supply_chain:
+    - supplier_lead_time_performance
+    - dc_fill_rate
+    - stockout_risk_skus
+    - cold_chain_excursions
+    - churn_risk_customers
+    - customer_order_summary
+    - product_search
+    - create_replenishment_draft
+    - flag_customer_for_outreach

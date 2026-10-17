@@ -31,3 +31,7 @@ build/
 
 # OS files
 .DS_Store
+
+# Local binaries
+bin/
+toolbox

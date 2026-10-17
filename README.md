@@ -12,6 +12,7 @@ stark-food-services/
 ├── Makefile                 # Build, data generation, and validation targets
 ├── README.md                # Full schema dictionary & intentional pattern documentation
 ├── pyproject.toml           # Python 3.11+ package configuration (src/sfs layout)
+├── tools.yaml               # MCP Toolbox for Databases configuration (7 read + 2 action tools)
 ├── scripts/
 │   └── load_bq.sh           # Idempotent BigQuery loader (--replace) for data/*.jsonl
 ├── sql/
@@ -285,6 +286,47 @@ Outbound delivery shipments with route assignment, delivery timestamps, on-time 
 | `on_time` | `BOOL` | `NOT NULL` | `true` if `actual_delivery` is within 30 minutes of `scheduled_delivery` |
 | `temperature_excursion` | `BOOL` | `NULL` | For `refrigerated`/`frozen` loads, `true` if compartment temp exceeded safe threshold (`NULL` for `ambient`) |
 | `peak_temp_f` | `FLOAT64` | `NULL` | Peak compartment temperature (°F) during transit for cold-chain loads (`NULL` for `ambient`) |
+
+
+### 13. `sfs_demo.replenishment_drafts` *(Append-Only Agent Action Table)*
+Append-only staging table written by the `create_replenishment_draft` MCP tool.
+
+| Column | BigQuery Type | Nullable | Description |
+|---|---|---|---|
+| `draft_id` | `STRING` | `NOT NULL` | Primary key (`GENERATE_UUID()`) |
+| `created_at` | `TIMESTAMP` | `NOT NULL` | UTC timestamp when the replenishment draft was created (`PARTITION BY DATE(created_at)`) |
+| `dc_id` | `STRING` | `NOT NULL` | Target distribution center ID (`CLUSTER BY dc_id, sku`) |
+| `sku` | `STRING` | `NOT NULL` | Product SKU requested for replenishment |
+| `cases_requested` | `INT64` | `NOT NULL` | Number of cases requested |
+| `rationale` | `STRING` | `NOT NULL` | Analytical rationale or agent justification for the draft |
+| `created_by` | `STRING` | `NOT NULL` | Identity of the MCP server or workflow (`sfs-mcp-toolbox`) |
+
+### 14. `sfs_demo.customer_flags` *(Append-Only Agent Action Table)*
+Append-only staging table written by the `flag_customer_for_outreach` MCP tool.
+
+| Column | BigQuery Type | Nullable | Description |
+|---|---|---|---|
+| `flag_id` | `STRING` | `NOT NULL` | Primary key (`GENERATE_UUID()`) |
+| `created_at` | `TIMESTAMP` | `NOT NULL` | UTC timestamp when the customer flag was recorded (`PARTITION BY DATE(created_at)`) |
+| `customer_id` | `STRING` | `NOT NULL` | Flagged customer account ID (`CLUSTER BY customer_id, flag_type`) |
+| `flag_type` | `STRING` | `NOT NULL` | Outreach classification (`CHURN_RISK`, `SERVICE_RECOVERY`, `COLD_CHAIN_REVIEW`) |
+| `note` | `STRING` | `NOT NULL` | Actionable context note for the account management team |
+| `created_by` | `STRING` | `NOT NULL` | Identity of the MCP server or workflow (`sfs-mcp-toolbox`) |
+
+---
+
+## Least-privilege tool surface
+
+The MCP server configured in [`tools.yaml`](tools.yaml) (powered by **MCP Toolbox for Databases**) exposes a deliberately narrow, parameterized tool surface rather than unrestricted `execute_sql` or raw schema access:
+
+1. **Complete Exclusion of Sensitive Financial Records (`sfs_demo.accounts_payable`)**:
+   - Even though `sfs_demo.accounts_payable` resides in the same BigQuery dataset (`sfs_demo`) and contains unmasked ABA routing numbers, bank account numbers, federal EINs (`supplier_tax_id`), and treasury remittance emails, **zero tools in `tools.yaml` reference `accounts_payable`**. An AI agent connected via MCP cannot query, infer, or exfiltrate supplier banking or tax records.
+2. **Column-Level PII Exclusion on `sfs_demo.customer_contacts`**:
+   - `sfs_demo.customer_contacts` contains personal names (`name`), direct email addresses (`email`), and phone numbers (`phone`). The MCP tools (`churn_risk_customers` and `customer_order_summary`) only project `customer_id` and aggregated job `role` (e.g., `Executive Chef`, `Director of Purchasing`) so the agent knows *which role* to engage without ever receiving PII.
+3. **Parameterized, Bounded Read Tools with Cost Guards**:
+   - All 7 read tools (`supplier_lead_time_performance`, `dc_fill_rate`, `stockout_risk_skus`, `cold_chain_excursions`, `churn_risk_customers`, `customer_order_summary`, `product_search`) use strongly typed BigQuery query parameters (`@param` — zero string interpolation), explicit `LIMIT` clauses (`<= 25` rows), `maxQueryResultRows: 50`, and `maximumBytesBilled: 250000000` (250 MB) on the `sfs-bq` source.
+4. **Append-Only Action Tools**:
+   - Write operations (`create_replenishment_draft` and `flag_customer_for_outreach`) are strictly confined to `INSERT` statements into the two dedicated append-only staging tables (`sfs_demo.replenishment_drafts` and `sfs_demo.customer_flags`). No tool can `UPDATE`, `DELETE`, or `DROP` operational supply-chain records.
 
 ---
 

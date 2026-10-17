@@ -255,3 +255,37 @@ CLUSTER BY dc_id, customer_id, route_id
 OPTIONS (
   description = 'Outbound delivery shipments with route assignment, on-time performance, and cold-chain excursion flags'
 );
+
+
+-- 13. Replenishment Drafts (Append-only write table for MCP agent actions)
+CREATE TABLE IF NOT EXISTS sfs_demo.replenishment_drafts (
+  draft_id STRING NOT NULL OPTIONS (description = 'Unique replenishment draft identifier (UUID)'),
+  created_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC timestamp when the replenishment draft was created'),
+  dc_id STRING NOT NULL OPTIONS (description = 'Target SFS distribution center ID'),
+  sku STRING NOT NULL OPTIONS (description = 'Product SKU requested for replenishment'),
+  cases_requested INT64 NOT NULL OPTIONS (description = 'Number of cases requested for replenishment'),
+  rationale STRING NOT NULL OPTIONS (description = 'Analytical rationale or agent justification for the draft PO'),
+  created_by STRING NOT NULL OPTIONS (description = 'Identity of the agent or workflow that created the draft'),
+  PRIMARY KEY (draft_id) NOT ENFORCED
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY dc_id, sku
+OPTIONS (
+  description = 'Append-only staging table for AI agent replenishment draft requests'
+);
+
+-- 14. Customer Flags (Append-only write table for MCP agent outreach actions)
+CREATE TABLE IF NOT EXISTS sfs_demo.customer_flags (
+  flag_id STRING NOT NULL OPTIONS (description = 'Unique customer outreach flag identifier (UUID)'),
+  created_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC timestamp when the customer flag was recorded'),
+  customer_id STRING NOT NULL OPTIONS (description = 'Flagged customer account ID'),
+  flag_type STRING NOT NULL OPTIONS (description = 'Outreach flag category (e.g., CHURN_RISK, SERVICE_RECOVERY)'),
+  note STRING NOT NULL OPTIONS (description = 'Actionable context note for account management outreach'),
+  created_by STRING NOT NULL OPTIONS (description = 'Identity of the agent or workflow that recorded the flag'),
+  PRIMARY KEY (flag_id) NOT ENFORCED
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY customer_id, flag_type
+OPTIONS (
+  description = 'Append-only staging table for AI agent customer retention and outreach flags'
+);
