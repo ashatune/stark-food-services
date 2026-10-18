@@ -8,12 +8,15 @@
 
 ```text
 stark-food-services/
-├── .gitignore               # Excludes .venv/, .env, *.json keys, and generated data/
-├── Makefile                 # Build, data generation, and validation targets
-├── README.md                # Full schema dictionary & intentional pattern documentation
+├── .dockerignore            # Excludes data/, .venv/, and local binaries from image builds
+├── .gitignore               # Excludes .venv/, .env, *.json keys, bin/, and generated data/
+├── Dockerfile               # Packages MCP Toolbox v1.14.0 with tools.yaml
+├── Makefile                 # Build, generate, validate, BigQuery load, and Cloud Run deploy targets
+├── README.md                # Full schema dictionary, governance docs, & GE registration guide
 ├── pyproject.toml           # Python 3.11+ package configuration (src/sfs layout)
 ├── tools.yaml               # MCP Toolbox for Databases configuration (7 read + 2 action tools)
 ├── scripts/
+│   ├── deploy_cloud_run.sh  # Idempotent Cloud Run deployment for sfs-mcp (v1.14.0)
 │   └── load_bq.sh           # Idempotent BigQuery loader (--replace) for data/*.jsonl
 ├── sql/
 │   ├── schema.sql           # Project-agnostic BigQuery DDL for all 12 sfs_demo tables
@@ -50,6 +53,9 @@ make load
 
 # 5. Run BigQuery SQL validation & pattern discovery queries
 bq --location=US query --use_legacy_sql=false < sql/validate.sql
+
+# 6. Deploy MCP Toolbox server (sfs-mcp) to Cloud Run (us-central1, auth required)
+make deploy
 ```
 
 ---
@@ -327,6 +333,74 @@ The MCP server configured in [`tools.yaml`](tools.yaml) (powered by **MCP Toolbo
    - All 7 read tools (`supplier_lead_time_performance`, `dc_fill_rate`, `stockout_risk_skus`, `cold_chain_excursions`, `churn_risk_customers`, `customer_order_summary`, `product_search`) use strongly typed BigQuery query parameters (`@param` — zero string interpolation), explicit `LIMIT` clauses (`<= 25` rows), `maxQueryResultRows: 50`, and `maximumBytesBilled: 250000000` (250 MB) on the `sfs-bq` source.
 4. **Append-Only Action Tools**:
    - Write operations (`create_replenishment_draft` and `flag_customer_for_outreach`) are strictly confined to `INSERT` statements into the two dedicated append-only staging tables (`sfs_demo.replenishment_drafts` and `sfs_demo.customer_flags`). No tool can `UPDATE`, `DELETE`, or `DROP` operational supply-chain records.
+
+
+---
+
+## Cloud Run MCP Endpoint & Gemini Enterprise Registration
+
+### Deployed Cloud Run Service (`sfs-mcp`)
+
+| Property | Value |
+|---|---|
+| **Project** | `hasha-gemini-proj1` (`286786555037`) |
+| **Region** | `us-central1` |
+| **Cloud Run Service** | `sfs-mcp` |
+| **Base Image** | `us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:1.14.0` |
+| **Artifact Registry Image** | `us-central1-docker.pkg.dev/hasha-gemini-proj1/sfs-mcp/sfs-mcp:1.14.0` |
+| **Runtime Service Account** | `sfs-toolbox-sa@hasha-gemini-proj1.iam.gserviceaccount.com` |
+| **Ingress Authentication** | **Required** (`--no-allow-unauthenticated`; returns `HTTP 403` to unauthenticated requests) |
+| **Transport Protocol** | MCP **StreamableHTTP** (`2025-03-26`) |
+| **StreamableHTTP MCP URL (Primary)** | `https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp` |
+| **StreamableHTTP MCP URL (Project-Number)** | `https://sfs-mcp-286786555037.us-central1.run.app/mcp` |
+
+### Service Account Least-Privilege IAM (`sfs-toolbox-sa`)
+- **Project-level**: `roles/bigquery.user` and `roles/bigquery.dataViewer`
+- **Table-level ONLY**: `roles/bigquery.dataEditor` bound exclusively on `sfs_demo.replenishment_drafts` and `sfs_demo.customer_flags` (via `bq add-iam-policy-binding`). The service account cannot modify or delete any of the 12 core supply-chain tables.
+
+### Verifying the Deployed Endpoint via CLI
+```bash
+# 1. Unauthenticated request (returns HTTP/2 403 Forbidden)
+curl -i -X POST https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+
+# 2. Authenticated StreamableHTTP tools/list request
+curl -sS -X POST https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+### Registering `sfs-mcp` in Gemini Enterprise Console
+
+1. **Grant Cloud Run Invoker to the Gemini Enterprise / Discovery Engine Service Agent** (so Gemini Enterprise can invoke the authenticated Cloud Run service):
+   ```bash
+   gcloud run services add-iam-policy-binding sfs-mcp \
+     --project=hasha-gemini-proj1 \
+     --region=us-central1 \
+     --member="serviceAccount:service-286786555037@gcp-sa-discoveryengine.iam.gserviceaccount.com" \
+     --role="roles/run.invoker"
+   ```
+   *(If registering via a custom OAuth/OIDC client or Workforce Identity principal in Gemini Enterprise, grant `roles/run.invoker` to that principal on `sfs-mcp`.)*
+2. **Open the Gemini Enterprise Console**:
+   - In the Google Cloud Console (project `hasha-gemini-proj1`), navigate to **Gemini Enterprise (Agentspace / AI Applications) → Tools / Extensions (or Actions & MCP Servers) → Add Tool / Connect MCP Server**.
+3. **Configure the MCP Server Connection**:
+   - **Display Name**: `Stark Food Services Supply Chain MCP`
+   - **Description**: `Read and action tools for Stark Food Services (SFS) distribution centers, supplier lead times, inventory stockout risk, cold-chain excursions, customer churn risk, replenishment drafts, and account outreach flags.`
+   - **Protocol / Transport**: `Streamable HTTP` (MCP)
+   - **Server Endpoint URL**:
+     ```text
+     https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp
+     ```
+   - **Authentication**: Select **Google Cloud IAM / Service Account OIDC** (using the Gemini Enterprise service agent or OAuth token passthrough for Cloud Run).
+4. **Verify Discovered Tools**:
+   - Click **Test / Fetch Tools** in the console and confirm all 9 tools appear:
+     - Read tools: `supplier_lead_time_performance`, `dc_fill_rate`, `stockout_risk_skus`, `cold_chain_excursions`, `churn_risk_customers`, `customer_order_summary`, `product_search`
+     - Action tools: `create_replenishment_draft`, `flag_customer_for_outreach`
+5. **Save and Attach to Your Agent / Assistant**:
+   - Save the MCP tool connector and enable it on your Gemini Enterprise assistant or custom agent.
 
 ---
 
