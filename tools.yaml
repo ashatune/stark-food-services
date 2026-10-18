@@ -4,7 +4,17 @@
 # from sfs_demo.customer_contacts.
 
 sources:
-  sfs-bq:
+  sfs-bq-read:
+    kind: bigquery
+    project: hasha-gemini-proj1
+    location: US
+    writeMode: blocked
+    allowedDatasets:
+      - sfs_demo
+    maxQueryResultRows: 50
+    maximumBytesBilled: 250000000
+
+  sfs-bq-write:
     kind: bigquery
     project: hasha-gemini-proj1
     location: US
@@ -17,12 +27,15 @@ sources:
 tools:
   supplier_lead_time_performance:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Compare each supplier's contracted replenishment lead time against actual
       delivery lead time over the trailing lookback_days window (anchored to the
       latest purchase order date in sfs_demo), returning worst offenders first
       by lead-time overrun and late receipt rate.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: lookback_days
         type: integer
@@ -60,11 +73,14 @@ tools:
 
   dc_fill_rate:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Calculate outbound customer case fill rate, short-shipped order rate, and
       invoiced order volume by distribution center for a given calendar month
       (YYYY-MM, e.g., '2026-08'), optionally filtered to a single dc_id.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: month
         type: string
@@ -98,12 +114,15 @@ tools:
 
   stockout_risk_skus:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Identify SKUs at a given distribution center (dc_id) whose end-of-day
       inventory position on the latest snapshot date has days_of_supply at or
       below days_of_supply_threshold, enriched with product and primary supplier
       details to guide replenishment drafts.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: dc_id
         type: string
@@ -131,7 +150,7 @@ tools:
         ON i.sku = p.sku
       JOIN `sfs_demo.suppliers` s
         ON p.primary_supplier_id = s.supplier_id
-      WHERE i.snapshot_date = DATE '2026-09-30'
+      WHERE i.snapshot_date = (SELECT MAX(snapshot_date) FROM `sfs_demo.inventory_snapshots`)
         AND i.dc_id = @dc_id
         AND i.days_of_supply <= @days_of_supply_threshold
       ORDER BY i.days_of_supply ASC, i.on_hand_cases ASC
@@ -139,12 +158,15 @@ tools:
 
   cold_chain_excursions:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Aggregate outbound refrigerated and frozen shipments between start_date
       and end_date (YYYY-MM-DD) by delivery route and origin distribution center,
       surfacing cold-chain temperature excursion counts, excursion rates, and
       peak compartment temperatures.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: start_date
         type: string
@@ -175,12 +197,15 @@ tools:
 
   churn_risk_customers:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Identify customer accounts whose average weekly ordered cases during the
       trailing weeks window (anchored to the latest order date in sfs_demo)
       dropped by at least pct_drop_threshold percent relative to their prior
       baseline weekly average. Includes non-PII contact roles only.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: weeks
         type: integer
@@ -255,11 +280,14 @@ tools:
 
   customer_order_summary:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Retrieve recent order history, fulfillment performance, and non-PII
       account metadata (including contact roles only, excluding contact name,
       email, and phone) for a specific customer_id.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: customer_id
         type: string
@@ -300,11 +328,14 @@ tools:
 
   product_search:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-read
     description: >-
       Search the SFS product catalog by optional category (produce, protein,
       dairy, dry, frozen, paper, chemical) and/or optional case-insensitive
       keyword matching SKU, description, or brand.
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
     parameters:
       - name: category
         type: string
@@ -344,11 +375,14 @@ tools:
 
   create_replenishment_draft:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-write
     description: >-
       Create an append-only replenishment draft request in
       sfs_demo.replenishment_drafts for a distribution center (dc_id) and SKU
       with the requested case quantity and analytical rationale.
+    annotations:
+      readOnlyHint: false
+      destructiveHint: true
     parameters:
       - name: dc_id
         type: string
@@ -384,10 +418,13 @@ tools:
 
   flag_customer_for_outreach:
     kind: bigquery-sql
-    source: sfs-bq
+    source: sfs-bq-write
     description: >-
       Record an append-only customer outreach flag in sfs_demo.customer_flags
       for account management follow-up (e.g., CHURN_RISK, SERVICE_RECOVERY).
+    annotations:
+      readOnlyHint: false
+      destructiveHint: true
     parameters:
       - name: customer_id
         type: string

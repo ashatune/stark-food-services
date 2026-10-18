@@ -329,10 +329,14 @@ The MCP server configured in [`tools.yaml`](tools.yaml) (powered by **MCP Toolbo
    - Even though `sfs_demo.accounts_payable` resides in the same BigQuery dataset (`sfs_demo`) and contains unmasked ABA routing numbers, bank account numbers, federal EINs (`supplier_tax_id`), and treasury remittance emails, **zero tools in `tools.yaml` reference `accounts_payable`**. An AI agent connected via MCP cannot query, infer, or exfiltrate supplier banking or tax records.
 2. **Column-Level PII Exclusion on `sfs_demo.customer_contacts`**:
    - `sfs_demo.customer_contacts` contains personal names (`name`), direct email addresses (`email`), and phone numbers (`phone`). The MCP tools (`churn_risk_customers` and `customer_order_summary`) only project `customer_id` and aggregated job `role` (e.g., `Executive Chef`, `Director of Purchasing`) so the agent knows *which role* to engage without ever receiving PII.
-3. **Parameterized, Bounded Read Tools with Cost Guards**:
-   - All 7 read tools (`supplier_lead_time_performance`, `dc_fill_rate`, `stockout_risk_skus`, `cold_chain_excursions`, `churn_risk_customers`, `customer_order_summary`, `product_search`) use strongly typed BigQuery query parameters (`@param` — zero string interpolation), explicit `LIMIT` clauses (`<= 25` rows), `maxQueryResultRows: 50`, and `maximumBytesBilled: 250000000` (250 MB) on the `sfs-bq` source.
-4. **Append-Only Action Tools**:
-   - Write operations (`create_replenishment_draft` and `flag_customer_for_outreach`) are strictly confined to `INSERT` statements into the two dedicated append-only staging tables (`sfs_demo.replenishment_drafts` and `sfs_demo.customer_flags`). No tool can `UPDATE`, `DELETE`, or `DROP` operational supply-chain records.
+3. **Parameterized, Bounded Read Tools with Cost Guards (`sfs-bq-read`)**:
+   - All 7 read tools (`supplier_lead_time_performance`, `dc_fill_rate`, `stockout_risk_skus`, `cold_chain_excursions`, `churn_risk_customers`, `customer_order_summary`, `product_search`) bind to the read-only `sfs-bq-read` source (`writeMode: blocked`), use strongly typed BigQuery query parameters (`@param` — zero string interpolation), explicit `LIMIT` clauses (`<= 25` rows), `maxQueryResultRows: 50`, and `maximumBytesBilled: 250000000` (250 MB).
+4. **Append-Only Action Tools (`sfs-bq-write`)**:
+   - Write operations (`create_replenishment_draft` and `flag_customer_for_outreach`) bind to the `sfs-bq-write` source (`writeMode: allowed`) and are strictly confined to `INSERT` statements into the two dedicated append-only staging tables (`sfs_demo.replenishment_drafts` and `sfs_demo.customer_flags`). No tool can `UPDATE`, `DELETE`, or `DROP` operational supply-chain records.
+5. **Two-Source Split (`sfs-bq-read` vs. `sfs-bq-write`) & MCP Tool Annotations**:
+   - In MCP Toolbox for Databases, `writeMode` is configured at the `bigquery` source level (`writeMode: blocked` enforces read-only `SELECT` execution and suppresses tools marked non-read-only, while `writeMode: allowed` permits DML), and custom `bigquery-sql` tools default to `{"readOnlyHint": false, "destructiveHint": true}` unless explicit `annotations:` are declared.
+   - When all tools shared a single `writeMode: allowed` source without explicit read-only annotations, `tools/list` reported `{"readOnlyHint": false, "destructiveHint": true}` on every tool—causing MCP hosts such as **Gemini Enterprise** to treat even read-only lookup tools (`product_search`, `dc_fill_rate`, etc.) as destructive actions (resulting in `"no actions are enabled"` when destructive actions are restricted).
+   - Splitting `tools.yaml` into `sfs-bq-read` (`writeMode: blocked`) with `annotations: {readOnlyHint: true, destructiveHint: false}` for the 7 read tools and `sfs-bq-write` (`writeMode: allowed`) with `annotations: {readOnlyHint: false, destructiveHint: true}` for the 2 write tools guarantees both source-level read-only enforcement in BigQuery and accurate MCP `tools/list` annotations for Gemini Enterprise.
 
 
 ---
@@ -374,6 +378,9 @@ curl -sS -X POST https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp \
 ```
 
 ### Registering `sfs-mcp` in Gemini Enterprise Console
+
+> **Prerequisite — Organization Policy Constraint**:
+> Before Gemini Enterprise can register a custom MCP server connector in the project, the managed organization policy constraint **`constraints/discoveryengine.managed.disableCustomMcpServerConnector`** must be **disabled** (set to *Not enforced* / `enforce: false`) on project `hasha-gemini-proj1`. If this constraint remains enforced, custom MCP connector registration will be blocked by Discovery Engine.
 
 1. **Grant Cloud Run Invoker to the Gemini Enterprise / Discovery Engine Service Agent** (so Gemini Enterprise can invoke the authenticated Cloud Run service):
    ```bash
