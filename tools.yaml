@@ -453,6 +453,33 @@ tools:
         'sfs-mcp-toolbox'
       );
 
+  # ==========================================================================
+  # INTENTIONALLY INSECURE — DEMO ONLY (Defense-in-Depth / Model Armor Demo)
+  # Exposes raw PII (contact_name, email, phone) from sfs_demo.customer_contacts.
+  # Kept strictly separate from the sfs_supply_chain toolset.
+  # ==========================================================================
+  customer_contact_lookup:
+    kind: bigquery-sql
+    source: sfs-bq-read
+    description: "Look up contact details for a customer account."
+    annotations:
+      readOnlyHint: true
+      destructiveHint: false
+    parameters:
+      - name: customer_id
+        type: string
+        description: Customer account ID (e.g., 'CUST-0230').
+    statement: |
+      SELECT
+        name AS contact_name,
+        email,
+        phone,
+        role
+      FROM `sfs_demo.customer_contacts`
+      WHERE customer_id = @customer_id
+      ORDER BY role ASC, name ASC
+      LIMIT 25
+
 toolsets:
   sfs_supply_chain:
     - supplier_lead_time_performance
@@ -464,3 +491,6 @@ toolsets:
     - product_search
     - create_replenishment_draft
     - flag_customer_for_outreach
+
+  sfs_demo_insecure:
+    - customer_contact_lookup

@@ -338,6 +338,17 @@ The MCP server configured in [`tools.yaml`](tools.yaml) (powered by **MCP Toolbo
    - When all tools shared a single `writeMode: allowed` source without explicit read-only annotations, `tools/list` reported `{"readOnlyHint": false, "destructiveHint": true}` on every tool—causing MCP hosts such as **Gemini Enterprise** to treat even read-only lookup tools (`product_search`, `dc_fill_rate`, etc.) as destructive actions (resulting in `"no actions are enabled"` when destructive actions are restricted).
    - Splitting `tools.yaml` into `sfs-bq-read` (`writeMode: blocked`) with `annotations: {readOnlyHint: true, destructiveHint: false}` for the 7 read tools and `sfs-bq-write` (`writeMode: allowed`) with `annotations: {readOnlyHint: false, destructiveHint: true}` for the 2 write tools guarantees both source-level read-only enforcement in BigQuery and accurate MCP `tools/list` annotations for Gemini Enterprise.
 
+### INTENTIONALLY INSECURE — DEMO ONLY
+
+> **WARNING — DO NOT COPY INTO PRODUCTION**:
+> [`tools.yaml`](tools.yaml) defines a **separate, isolated toolset** named `sfs_demo_insecure` containing a single deliberately-leaky tool: `customer_contact_lookup(customer_id)`.
+>
+> - **What it does**: Queries `sfs_demo.customer_contacts` and returns raw PII columns (`contact_name`, `email`, `phone`, `role`) for a given `customer_id`.
+> - **Why it exists**: This tool intentionally violates the least-privilege design of the primary `sfs_supply_chain` toolset for a two-layer **Defense-in-Depth & Model Armor demo** (see [`docs/model_armor_demo.md`](docs/model_armor_demo.md)):
+>   1. **Layer 1 (Structural Tool-Surface Exclusion)**: When only the production `sfs_supply_chain` toolset (`/mcp/sfs_supply_chain`) is enabled, no tool can ever query or return PII (`name`, `email`, `phone`) or supplier banking details (`accounts_payable`).
+>   2. **Layer 2 (Model Armor Outbound Response Guard)**: When someone ships a careless tool (`sfs_demo_insecure` / `customer_contact_lookup`) that leaks customer PII into the model context, **Model Armor** (`sfs-response-guard` with Sensitive Data Protection inspection) intercepts and blocks/flags the outbound assistant response before PII reaches the user.
+> - **Strict Isolation**: `customer_contact_lookup` is kept completely **OUT** of the `sfs_supply_chain` toolset. Never include `sfs_demo_insecure` or `customer_contact_lookup` in any real deployment.
+
 
 ---
 
