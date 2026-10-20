@@ -393,6 +393,11 @@ curl -sS -X POST https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp \
 > **Prerequisite — Organization Policy Constraint**:
 > Before Gemini Enterprise can register a custom MCP server connector in the project, the managed organization policy constraint **`constraints/discoveryengine.managed.disableCustomMcpServerConnector`** must be **disabled** (set to *Not enforced* / `enforce: false`) on project `hasha-gemini-proj1`. If this constraint remains enforced, custom MCP connector registration will be blocked by Discovery Engine.
 
+> **Prerequisite — Model Armor & Gemini Enterprise Location Compatibility**:
+> - **No `global` Model Armor Template Location**: Model Armor does **not** have a `global` template location; it supports multi-regions (`us`, `eu`) and specific regions (`us-central1`, `us-east1`, `us-east4`, `us-west1`, etc.).
+> - **Template Location Must Match Gemini Enterprise App Location**: Gemini Enterprise enforces strict location compatibility when attaching Model Armor templates to an assistant. A Gemini Enterprise app in the **`global`** location rejects single-region templates (such as `us-central1`) with `"Location in Model Armor Template name ... is not allowed for the assistant location: global"` and requires **`us`** (or **`eu`**) multi-region templates (`projects/hasha-gemini-proj1/locations/us/templates/sfs-prompt-guard-us` and `projects/hasha-gemini-proj1/locations/us/templates/sfs-response-guard-us`). Conversely, a regional Gemini Enterprise app requires templates in the matching region.
+> - **Plan App Location Before Deployment**: Always determine the Gemini Enterprise app's location (`global` vs. regional) before provisioning Model Armor templates and their backing Sensitive Data Protection (`dlp.googleapis.com`) inspection templates (which must also reside in the exact same location as the Model Armor template).
+
 1. **Grant Cloud Run Invoker to the Gemini Enterprise / Discovery Engine Service Agent** (so Gemini Enterprise can invoke the authenticated Cloud Run service):
    ```bash
    gcloud run services add-iam-policy-binding sfs-mcp \

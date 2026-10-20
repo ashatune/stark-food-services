@@ -9,13 +9,17 @@ This guide walks through a five-step live demonstration of **two independent lay
 
 ---
 
-## Deployed Resources (`hasha-gemini-proj1` / `us-central1`)
+## Deployed Resources (`hasha-gemini-proj1`)
+
+> **Location Note (`us` Multi-Region for `global` Gemini Enterprise Apps)**:
+> Because Gemini Enterprise apps deployed in `locations/global` require multi-region Model Armor templates (`locations/us`) and reject single-region templates (`locations/us-central1`), use **`sfs-prompt-guard-us`** and **`sfs-response-guard-us`** in `locations/us` when attaching to a `global` Gemini Enterprise assistant.
 
 | Resource | Identifier / Endpoint | Purpose |
 |---|---|---|
-| **Inbound Model Armor Template** | `projects/hasha-gemini-proj1/locations/us-central1/templates/sfs-prompt-guard` | Screens user prompts for **Prompt Injection & Jailbreak** (`MEDIUM_AND_ABOVE`) and **Responsible AI** (`HATE_SPEECH`, `HARASSMENT`, `SEXUALLY_EXPLICIT`, `DANGEROUS` at `MEDIUM_AND_ABOVE`). |
-| **Outbound Model Armor Template** | `projects/hasha-gemini-proj1/locations/us-central1/templates/sfs-response-guard` | Screens assistant responses using **Advanced Sensitive Data Protection** (`sfs-response-sdp-inspect`), **Malicious URI Detection** (`ENABLED`), and **Responsible AI** (`MEDIUM_AND_ABOVE`). |
-| **SDP Inspect Template** | `projects/hasha-gemini-proj1/locations/us-central1/inspectTemplates/sfs-response-sdp-inspect` | Detects `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_TOLLFREE_PHONE_NUMBER`, `US_BANK_ROUTING_MICR`, `FINANCIAL_ACCOUNT_NUMBER`, `IBAN_CODE`, `SWIFT_CODE`, `CREDIT_CARD_NUMBER`, `US_EMPLOYER_IDENTIFICATION_NUMBER`, `US_SOCIAL_SECURITY_NUMBER`, `US_INDIVIDUAL_TAXPAYER_IDENTIFICATION_NUMBER`, plus custom regex detectors for US phone numbers and 9-digit ABA routing numbers (`minLikelihood: POSSIBLE`). |
+| **Inbound Model Armor Template (`us` multi-region — use for `global` GE app)** | `projects/hasha-gemini-proj1/locations/us/templates/sfs-prompt-guard-us` | Screens user prompts for **Prompt Injection & Jailbreak** (`MEDIUM_AND_ABOVE`) and **Responsible AI** (`HATE_SPEECH`, `HARASSMENT`, `SEXUALLY_EXPLICIT`, `DANGEROUS` at `MEDIUM_AND_ABOVE`). |
+| **Outbound Model Armor Template (`us` multi-region — use for `global` GE app)** | `projects/hasha-gemini-proj1/locations/us/templates/sfs-response-guard-us` | Screens assistant responses using **Advanced Sensitive Data Protection** (`locations/us/inspectTemplates/sfs-response-sdp-inspect`), **Malicious URI Detection** (`ENABLED`), **Responsible AI** (`MEDIUM_AND_ABOVE`), with **PI/JB** set to `DISABLED`. |
+| **SDP Inspect Template (`us` multi-region)** | `projects/hasha-gemini-proj1/locations/us/inspectTemplates/sfs-response-sdp-inspect` | Detects `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_TOLLFREE_PHONE_NUMBER`, `US_BANK_ROUTING_MICR`, `FINANCIAL_ACCOUNT_NUMBER`, `IBAN_CODE`, `SWIFT_CODE`, `CREDIT_CARD_NUMBER`, `US_EMPLOYER_IDENTIFICATION_NUMBER`, `US_SOCIAL_SECURITY_NUMBER`, `US_INDIVIDUAL_TAXPAYER_IDENTIFICATION_NUMBER`, plus custom regex detectors for US phone numbers and 9-digit ABA routing numbers (`minLikelihood: POSSIBLE`). |
+| **Regional Templates (`us-central1`)** | `projects/hasha-gemini-proj1/locations/us-central1/templates/sfs-prompt-guard`<br>`projects/hasha-gemini-proj1/locations/us-central1/templates/sfs-response-guard` | Regional equivalents in `us-central1` (backed by `projects/hasha-gemini-proj1/locations/us-central1/inspectTemplates/sfs-response-sdp-inspect`). |
 | **Production MCP Toolset URL** | `https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp/sfs_supply_chain` | Exposes **only** the 9 least-privilege supply-chain tools (7 read, 2 append-only write). Excludes `customer_contact_lookup`. |
 | **Insecure Demo MCP Toolset URL** | `https://sfs-mcp-bbjavqj2ba-uc.a.run.app/mcp/sfs_demo_insecure` *(or `/mcp` for all 10 tools)* | Exposes the deliberately-leaky `customer_contact_lookup(customer_id)` tool for Call (d). |
 
